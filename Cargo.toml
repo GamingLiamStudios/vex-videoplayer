@@ -1,9 +1,9 @@
 [package]
-name = "vexide-template"
+name = "videoplayer"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+build = "build.rs"
 
 # These fields configure default behavior for uploads with `cargo v5`.
 [package.metadata.v5]
@@ -14,3 +14,6 @@ compress = true
 
 [dependencies]
 vexide = "0.7.0"
+
+[build-dependencies]
+bindgen = "0.71"

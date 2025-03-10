@@ -4,3 +4,8 @@ target = "./armv7a-vex-v5.json"
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
+
+[env]
+#FFMPEG_PKG_CONFIG_PATH = { value = "ffmpeg-build/lib/pkgconfig", relative = true }
+FFMPEG_LIBS_DIR = { value = "ffmpeg-build/lib", relative = true }
+FFMPEG_INCLUDE_DIR = { value = "ffmpeg-build/include", relative = true }
