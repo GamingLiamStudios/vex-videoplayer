@@ -3,13 +3,15 @@
 #![no_std]
 
 extern crate alloc;
-use alloc::{boxed::Box, string::String, vec};
+use alloc::{borrow::ToOwned, boxed::Box, string::String, vec};
 use core::{
     ffi::{CStr, c_int, c_long, c_size_t, c_void},
     pin::Pin,
+    time::Duration,
 };
 
-use vexide::{fs::File, prelude::*, sync::LazyLock};
+use rgb::FromSlice;
+use vexide::{devices::display::Rect, fs::File, prelude::*, sync::LazyLock, time::Instant};
 
 #[allow(
     non_snake_case,
@@ -49,7 +51,6 @@ mod ffmpeg_alloc {
     /// Panics on Out of Memory
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn vexide_realloc(ptr: *mut c_void, size: c_size_t) -> *mut c_void {
-        println!("Realloc {ptr:?} to size {size}");
         unsafe {
             match (*ALLOCATED.0.get()).get(&ptr) {
                 Some(layout) => {
@@ -97,7 +98,6 @@ mod ffmpeg_alloc {
     /// Panics on Out of Memory
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn vexide_memalign(align: c_size_t, size: c_size_t) -> *mut c_void {
-        println!("Alloc {size} with align {align}");
         let layout = Layout::from_size_align(size, align).expect("Invalid mem layout");
         unsafe {
             let ptr: *mut c_void = alloc::alloc::alloc(layout).cast();
@@ -117,7 +117,6 @@ mod ffmpeg_alloc {
         align: c_size_t,
         size: c_size_t,
     ) -> c_int {
-        println!("Alloc {size} with align {align}");
         let Ok(layout) = Layout::from_size_align(size, align) else {
             return 22; // EINVAL
         };
@@ -147,22 +146,20 @@ impl Compete for Robot {
     }
 }
 
+const AVERROR_EOF: i32 =
+    -(((b'E' as u32) | (b'O' as u32) << 8 | (b'F' as u32) << 16 | (b' ' as u32) << 24) as i32);
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn vexide_file_read(context: *mut c_void, ptr: *mut u8, size: i32) -> i32 {
     let mut file: Box<File> = unsafe { Box::from_raw(context.cast()) };
-    println!(
-        "Attempting read of {size} at {}",
-        file.tell().expect("shit")
-    );
 
     // Read from current position into
     let buf = core::ptr::slice_from_raw_parts_mut(ptr, size as usize);
     let read = unsafe { file.read(&mut *buf).expect("Failed to read file") };
-    println!("Read {read} bytes");
 
     core::mem::forget(file); // Don't drop the file
     if read == 0 && size != 0 {
-        -(((b'E' as u32) | (b'O' as u32) << 8 | (b'F' as u32) << 16 | (b' ' as u32) << 24) as i32)
+        AVERROR_EOF
     } else {
         read as i32
     }
@@ -192,7 +189,6 @@ unsafe extern "C" fn vexide_file_seek(context: *mut c_void, offset: i64, whence:
         whence => panic!("Invalid seek position {whence}"),
     };
 
-    println!("Seek to {offset:?}");
     let new_offset = file.seek(offset).expect("shitface");
 
     core::mem::forget(file);
@@ -350,25 +346,18 @@ extern "C" fn _init() {
 
 unsafe extern "C" {
     unsafe fn __libc_init_array();
+
     #[link_name = "__errno"]
     unsafe fn errno_location() -> *mut c_int;
-
-    static __heap_start: u8;
-    static __heap_end: u8;
 }
 
 #[vexide::main]
-async fn main(peripherals: Peripherals) {
+async fn main(mut peripherals: Peripherals) {
     println!("shitface");
     let robot = Robot {};
 
     unsafe {
         __libc_init_array();
-        ffmpeg::av_log(
-            core::ptr::null_mut(),
-            ffmpeg::AV_LOG_FATAL as i32,
-            "fmt".as_ptr(),
-        );
     }
 
     let video_file = vexide::fs::File::open("video.mkv").expect("shitface");
@@ -427,9 +416,166 @@ async fn main(peripherals: Peripherals) {
         }
         println!("AVFormat Find Stream Info");
 
-        // Hopefully shouldn't kill itself as soon as it hits the printf
-        ffmpeg::av_dump_format(av_context, 0, "VexideFile".as_ptr(), 0);
-        println!("AV Dump Format");
+        let mut codec: *const ffmpeg::AVCodec = core::ptr::null();
+        let stream_index = ffmpeg::av_find_best_stream(
+            av_context,
+            ffmpeg::AVMEDIA_TYPE_VIDEO,
+            -1,
+            -1,
+            &mut codec as *mut *const _,
+            0,
+        );
+        if stream_index < 0 {
+            let mut str = [0u8; 1024];
+            ffmpeg::av_strerror(stream_index, &mut str as *mut _, 1024);
+            println!(
+                "Failed to find best stream/decoder: {}",
+                CStr::from_bytes_until_nul(&str)
+                    .expect("shitface")
+                    .to_str()
+                    .expect("shitface")
+            );
+            return;
+        }
+        let stream = *(*av_context).streams.add(stream_index as usize);
+        println!("Found best stream+decoder");
+
+        let parser = ffmpeg::av_parser_init((*codec).id as c_int);
+        if parser.is_null() {
+            println!("Failed to create parser");
+            return;
+        }
+
+        let codec_ctx = ffmpeg::avcodec_alloc_context3(codec);
+        if codec_ctx.is_null() {
+            println!("Failed to create codec context");
+            return;
+        }
+
+        let result = ffmpeg::avcodec_parameters_to_context(codec_ctx, (*stream).codecpar);
+        if result < 0 {
+            println!("Failed to copy parameters to context");
+            return;
+        }
+
+        let result = ffmpeg::avcodec_open2(codec_ctx, codec, core::ptr::null_mut());
+        if result < 0 {
+            println!("Failed to open codec stream");
+            return;
+        }
+
+        let frame = ffmpeg::av_frame_alloc();
+        let packet = ffmpeg::av_packet_alloc();
+
+        peripherals
+            .display
+            .set_render_mode(vexide::devices::display::RenderMode::Immediate);
+        println!("Ready to render");
+
+        let scaled = ffmpeg::av_frame_alloc();
+        (*scaled).format = ffmpeg::AV_PIX_FMT_RGB24;
+        (*scaled).width = Display::HORIZONTAL_RESOLUTION as i32;
+        (*scaled).height = Display::VERTICAL_RESOLUTION as i32;
+        ffmpeg::av_frame_get_buffer(scaled, 0);
+
+        println!("Here?");
+
+        let start = Instant::now();
+
+        while ffmpeg::av_read_frame(av_context, packet) >= 0 {
+            let result = ffmpeg::avcodec_send_packet(codec_ctx, packet);
+            if result < 0 {
+                let mut str = [0u8; 1024];
+                ffmpeg::av_strerror(result, &mut str as *mut _, 1024);
+                println!(
+                    "Failed to decode packet: {}",
+                    CStr::from_bytes_until_nul(&str)
+                        .expect("shitface")
+                        .to_str()
+                        .expect("shitface")
+                );
+                return;
+            }
+
+            loop {
+                let begin = Instant::now();
+                const AVERROR_EAGAIN: i32 = -(ffmpeg::EAGAIN as i32);
+                match ffmpeg::avcodec_receive_frame(codec_ctx, frame) {
+                    0.. => (),
+                    AVERROR_EOF | AVERROR_EAGAIN => {
+                        break;
+                    }
+                    result => {
+                        let mut str = [0u8; 1024];
+                        ffmpeg::av_strerror(result, &mut str as *mut _, 1024);
+                        println!(
+                            "Failed to decode packet: {}",
+                            CStr::from_bytes_until_nul(&str)
+                                .expect("shitface")
+                                .to_str()
+                                .expect("shitface")
+                        );
+                        return;
+                    }
+                }
+
+                // Rescale to brain size + color format
+
+                let scale_context = ffmpeg::sws_getContext(
+                    (*frame).width,
+                    (*frame).height,
+                    (*frame).format,
+                    (*scaled).width,
+                    (*scaled).height,
+                    (*scaled).format,
+                    ffmpeg::SWS_BILINEAR as i32,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                );
+                ffmpeg::sws_scale(
+                    scale_context,
+                    &(*frame).data as *const *mut _ as *const *const _,
+                    &(*frame).linesize as *const _,
+                    0,
+                    (*frame).height,
+                    &(*scaled).data as *const *mut _,
+                    &(*scaled).linesize as *const _,
+                );
+                ffmpeg::sws_freeContext(scale_context);
+
+                let raw_pixels = core::slice::from_raw_parts(
+                    (*scaled).data[0],
+                    (*scaled).linesize[0] as usize * (*scaled).height as usize,
+                )
+                .as_rgb();
+
+                let fract = (*stream).time_base.num as f64 / (*stream).time_base.den as f64;
+                let pres = (*packet).pts as f64 * fract;
+                println!("took {:?} to render", begin.elapsed());
+                println!(
+                    "current time: {}, presenting at: {pres}",
+                    start.elapsed().as_secs_f64()
+                );
+                sleep_until(start + Duration::from_secs_f64(pres)).await;
+
+                peripherals.display.draw_buffer(
+                    Rect::from_dimensions(
+                        [0, 0],
+                        Display::HORIZONTAL_RESOLUTION as u16,
+                        Display::VERTICAL_RESOLUTION as u16,
+                    ),
+                    raw_pixels.iter().map(|pixel| pixel.to_owned()),
+                    (*scaled).linesize[0] / 3,
+                );
+
+                //peripherals.display.draw_buffer(region, buf, src_stride);
+
+                ffmpeg::av_frame_unref(frame);
+            }
+
+            ffmpeg::av_packet_unref(packet);
+        }
 
         ffmpeg::avformat_close_input(&mut av_context as *mut _);
 
@@ -439,6 +585,4 @@ async fn main(peripherals: Peripherals) {
 
         ffmpeg::avformat_free_context(av_context);
     }
-
-    robot.compete().await;
 }

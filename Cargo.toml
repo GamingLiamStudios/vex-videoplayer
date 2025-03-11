@@ -7,13 +7,14 @@ build = "build.rs"
 
 # These fields configure default behavior for uploads with `cargo v5`.
 [package.metadata.v5]
-upload-strategy = "differential"
+upload-strategy = "monolith"
 slot = 1
 icon = "cool-x"
 compress = true
 
 [dependencies]
 vexide = { version = "0.7.0", features = ["force_rust_libm", "allocator"] }
+rgb = "*"
 
 #rusty_ffmpeg = { version = "0.16", features = ["ffmpeg7"] }
 libc = { version = "0.2", default-features = false }
