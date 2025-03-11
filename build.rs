@@ -20,10 +20,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         libdir_path.to_str().unwrap()
     );
 
-    println!("cargo:rustc-link-lib=avcodec");
-    println!("cargo:rustc-link-lib=avformat");
-    println!("cargo:rustc-link-lib=avutil");
-    println!("cargo:rustc-link-lib=swscale");
+    // Newlib
+    println!("cargo:rustc-link-search=/usr/arm-none-eabi/lib");
+    println!("cargo:rustc-link-lib=c");
+    println!("cargo:rustc-link-lib=m");
+
+    println!("cargo:rustc-link-lib=static=avcodec");
+    println!("cargo:rustc-link-lib=static=avformat");
+    println!("cargo:rustc-link-lib=static=avutil");
+    println!("cargo:rustc-link-lib=static=swscale");
+
+    println!("cargo:rerun-if-changed=build.rs");
 
     // Search include dir and bindgen all headers
     let include_dir = libdir_path.join("include");
@@ -40,7 +47,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .contains(&path.strip_prefix(&include_dir)?.to_str().expect("shitface"))
             {
                 // Make sure we've skipped any HW specific headers
-                paths.push(path);
+                paths.push(path.clone());
+                println!("cargo:rerun-if-changed={}", path.display());
             }
         }
     }
@@ -56,6 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .clang_arg("-I/usr/arm-none-eabi/include")
         .prepend_enum_name(false)
         .use_core()
+        .clang_macro_fallback()
         .generate()?;
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());

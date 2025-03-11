@@ -1,5 +1,6 @@
 [build]
 target = "./armv7a-vex-v5.json"
+rustflags = ["-C", "link-args=-lnosys"]
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
