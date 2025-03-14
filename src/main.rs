@@ -422,21 +422,17 @@ extern "C" fn pthread_once(
 
 #[unsafe(no_mangle)]
 extern "C" fn pthread_attr_init(attr: *mut ffmpeg::pthread_attr_t) -> c_int {
-    print!("Attr Init");
     unsafe {
         (*attr).is_initialized = 1;
     }
-    println!("good");
     0
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn pthread_attr_destroy(attr: *mut ffmpeg::pthread_attr_t) -> c_int {
-    print!("Attr Dest");
     unsafe {
         (*attr).is_initialized = 0;
     }
-    println!("good");
     0
 }
 
@@ -445,11 +441,9 @@ extern "C" fn pthread_attr_setstacksize(
     attr: *mut ffmpeg::pthread_attr_t,
     stack_size: c_size_t,
 ) -> c_int {
-    print!("Attr Stak");
     unsafe {
         (*attr).stacksize = stack_size as i32;
     }
-    println!("good");
     0
 }
 
