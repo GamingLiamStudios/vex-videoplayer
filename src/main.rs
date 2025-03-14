@@ -1,17 +1,31 @@
-#![feature(c_size_t)]
+#![feature(c_size_t, sync_unsafe_cell)]
 #![no_main]
 #![no_std]
 
 extern crate alloc;
-use alloc::{borrow::ToOwned, boxed::Box, string::String, vec};
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
+    collections::{BTreeMap, BTreeSet},
+    string::String,
+    vec,
+};
 use core::{
+    cell::{SyncUnsafeCell, UnsafeCell},
     ffi::{CStr, c_int, c_long, c_size_t, c_void},
     pin::Pin,
     time::Duration,
 };
 
 use rgb::FromSlice;
-use vexide::{devices::display::Rect, fs::File, prelude::*, sync::LazyLock, time::Instant};
+use vexide::{
+    devices::display::Rect,
+    fs::File,
+    prelude::*,
+    startup::banner::themes::BannerTheme,
+    sync::{LazyLock, Mutex},
+    time::Instant,
+};
 
 #[allow(
     non_snake_case,
@@ -85,6 +99,7 @@ mod ffmpeg_alloc {
             return; // Early exit for nullptr
         }
 
+        //println!("Freed ptr {ptr:?}");
         unsafe {
             let Some(layout) = (*ALLOCATED.0.get()).remove(&ptr) else {
                 vexide::io::println!("Double free at {ptr:?}");
@@ -104,6 +119,7 @@ mod ffmpeg_alloc {
             if ptr.is_null() {
                 alloc::alloc::handle_alloc_error(layout);
             }
+            //println!("Allocated {size} at {ptr:?}");
 
             (*ALLOCATED.0.get()).insert(ptr, layout);
             ptr
@@ -131,18 +147,6 @@ mod ffmpeg_alloc {
                 0
             }
         }
-    }
-}
-
-struct Robot {}
-
-impl Compete for Robot {
-    async fn autonomous(&mut self) {
-        println!("Autonomous!");
-    }
-
-    async fn driver(&mut self) {
-        println!("Driver!");
     }
 }
 
@@ -211,20 +215,15 @@ extern "C" fn _kill() {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn _write(file: c_int, buf: *const u8, len: c_size_t) -> c_int {
-    match file {
-        1 | 2 => {
-            // Stdout/err
-            unsafe {
-                let os_str = core::slice::from_raw_parts(buf, len);
-                let str = String::from_utf8_lossy(os_str);
-                print!("{str:?}");
-            }
-
-            len as c_int
-        }
-        _ => unimplemented!(),
+extern "C" fn _write(_file: c_int, buf: *const u8, len: c_size_t) -> c_int {
+    // Stdout/err
+    unsafe {
+        let os_str = core::slice::from_raw_parts(buf, len);
+        let str = String::from_utf8_lossy(os_str);
+        println!("{str:?}");
     }
+
+    len as c_int
 }
 
 #[unsafe(no_mangle)]
@@ -234,9 +233,9 @@ extern "C" fn _read() {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn _getpid() {
+extern "C" fn _getpid() -> c_int {
     println!("GetPID!");
-    unimplemented!();
+    1
 }
 
 struct SbrkInfo {
@@ -279,10 +278,30 @@ extern "C" fn sysconf(name: c_int) -> c_long {
     -1
 }
 
+#[repr(C)]
+struct Stat {
+    st_dev: ffmpeg::dev_t,         /* ID of device containing file */
+    st_ino: ffmpeg::ino_t,         /* inode number */
+    st_mode: ffmpeg::mode_t,       /* protection */
+    st_nlink: ffmpeg::nlink_t,     /* number of hard links */
+    st_uid: ffmpeg::uid_t,         /* user ID of owner */
+    st_gid: ffmpeg::gid_t,         /* group ID of owner */
+    st_rdev: ffmpeg::dev_t,        /* device ID (if special file) */
+    st_size: ffmpeg::off_t,        /* total size, in bytes */
+    st_blksize: ffmpeg::blksize_t, /* blocksize for file system I/O */
+    st_blocks: ffmpeg::blkcnt_t,   /* number of 512B blocks allocated */
+    st_atime: ffmpeg::time_t,      /* time of last access */
+    st_mtime: ffmpeg::time_t,      /* time of last modification */
+    st_ctime: ffmpeg::time_t,      /* time of last status change */
+}
+
 #[unsafe(no_mangle)]
-extern "C" fn _fstat() {
+extern "C" fn _fstat(_fd: c_int, stat: *mut Stat) -> c_int {
     println!("fstat!");
-    unimplemented!();
+    unsafe {
+        (*stat).st_mode = 8192;
+    }
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -344,7 +363,159 @@ extern "C" fn _init() {
     println!("Init!");
 }
 
+struct ThreadReactor {
+    active: BTreeMap<ffmpeg::pthread_t, Pin<Box<dyn Future<Output = *mut c_void>>>>,
+    next_id: ffmpeg::pthread_t,
+}
+
+unsafe impl Sync for ThreadReactor {}
+
+static ACTIVE_THREADS: SyncUnsafeCell<ThreadReactor> = SyncUnsafeCell::new(ThreadReactor {
+    active: BTreeMap::new(),
+    next_id: 1,
+});
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_create(
+    pthread: *mut ffmpeg::pthread_t,
+    _attr: *const ffmpeg::pthread_attr_t,
+    routine: extern "C" fn(*mut c_void) -> *mut c_void,
+    arg: *mut c_void,
+) -> c_int {
+    let future = spawn(async move { routine(arg) });
+
+    unsafe {
+        let id = (*ACTIVE_THREADS.get()).next_id;
+        (*ACTIVE_THREADS.get()).next_id += 1;
+        (*ACTIVE_THREADS.get()).active.insert(id, Box::pin(future));
+
+        pthread.write(id);
+    }
+
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_join(thread: ffmpeg::pthread_t, value: *mut *mut c_void) -> c_int {
+    print!("Join");
+    unsafe {
+        let future = (*ACTIVE_THREADS.get())
+            .active
+            .remove(&thread)
+            .expect("Thread doesn't exist");
+
+        value.write(block_on(future));
+    }
+
+    println!("good");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_once(
+    _once_ctrl: *mut ffmpeg::pthread_once_t,
+    routine: extern "C" fn(),
+) -> c_int {
+    routine();
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_attr_init(attr: *mut ffmpeg::pthread_attr_t) -> c_int {
+    print!("Attr Init");
+    unsafe {
+        (*attr).is_initialized = 1;
+    }
+    println!("good");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_attr_destroy(attr: *mut ffmpeg::pthread_attr_t) -> c_int {
+    print!("Attr Dest");
+    unsafe {
+        (*attr).is_initialized = 0;
+    }
+    println!("good");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_attr_setstacksize(
+    attr: *mut ffmpeg::pthread_attr_t,
+    stack_size: c_size_t,
+) -> c_int {
+    print!("Attr Stak");
+    unsafe {
+        (*attr).stacksize = stack_size as i32;
+    }
+    println!("good");
+    0
+}
+
+// Mutexes can basically be noops (for now)
+#[unsafe(no_mangle)]
+extern "C" fn pthread_mutex_init(
+    mutex: *mut ffmpeg::pthread_mutex_t,
+    attr: *const ffmpeg::pthread_mutexattr_t,
+) -> c_int {
+    //println!("Mutex Init");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_mutex_destroy(mutex: *mut ffmpeg::pthread_mutex_t) -> c_int {
+    //println!("Mutex Destr");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_mutex_lock(mutex: *mut ffmpeg::pthread_mutex_t) -> c_int {
+    //println!("Mutex Lock");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_mutex_unlock(mutex: *mut ffmpeg::pthread_mutex_t) -> c_int {
+    //println!("Mutex unLock");
+    0
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_cond_init(
+    cond: *mut ffmpeg::pthread_cond_t,
+    attr: *const ffmpeg::pthread_condattr_t,
+) -> c_int {
+    unimplemented!("pthread_cond_init")
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_cond_destroy(cond: *mut ffmpeg::pthread_cond_t) -> c_int {
+    unimplemented!("pthread_cond_destroy")
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_cond_broadcast(cond: *mut ffmpeg::pthread_cond_t) -> c_int {
+    unimplemented!("pthread_cond_broadcast")
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_cond_signal(cond: *mut ffmpeg::pthread_cond_t) -> c_int {
+    unimplemented!("pthread_cond_signal")
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn pthread_cond_wait(
+    cond: *mut ffmpeg::pthread_cond_t,
+    mutex: *mut ffmpeg::pthread_mutex_t,
+) -> c_int {
+    unimplemented!("pthread_cond_wait")
+}
+
 unsafe extern "C" {
+    static __heap_start: u8;
+    static __heap_end: u8;
+
     unsafe fn __libc_init_array();
 
     #[link_name = "__errno"]
@@ -354,13 +525,18 @@ unsafe extern "C" {
 #[vexide::main]
 async fn main(mut peripherals: Peripherals) {
     println!("shitface");
-    let robot = Robot {};
 
     unsafe {
         __libc_init_array();
     }
 
-    let video_file = vexide::fs::File::open("video.mkv").expect("shitface");
+    println!(
+        "Usable memory range: {:?}-{:?}",
+        core::ptr::addr_of!(__heap_start),
+        core::ptr::addr_of!(__heap_end)
+    );
+
+    let video_file = vexide::fs::File::open("renaicirc.webm").expect("shitface");
     println!("Opened file");
 
     unsafe {
@@ -478,7 +654,18 @@ async fn main(mut peripherals: Peripherals) {
         (*scaled).height = Display::VERTICAL_RESOLUTION as i32;
         ffmpeg::av_frame_get_buffer(scaled, 0);
 
-        println!("Here?");
+        let scale_context = ffmpeg::sws_getContext(
+            (*codec_ctx).coded_width,
+            (*codec_ctx).coded_height,
+            (*(*stream).codecpar).format,
+            (*scaled).width,
+            (*scaled).height,
+            (*scaled).format,
+            ffmpeg::SWS_BILINEAR as i32,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
 
         let start = Instant::now();
 
@@ -519,20 +706,9 @@ async fn main(mut peripherals: Peripherals) {
                     }
                 }
 
-                // Rescale to brain size + color format
+                //println!("Decoded packet in {:?}", begin.elapsed());
 
-                let scale_context = ffmpeg::sws_getContext(
-                    (*frame).width,
-                    (*frame).height,
-                    (*frame).format,
-                    (*scaled).width,
-                    (*scaled).height,
-                    (*scaled).format,
-                    ffmpeg::SWS_BILINEAR as i32,
-                    core::ptr::null_mut(),
-                    core::ptr::null_mut(),
-                    core::ptr::null_mut(),
-                );
+                // Rescale to brain size + color format
                 ffmpeg::sws_scale(
                     scale_context,
                     &(*frame).data as *const *mut _ as *const *const _,
@@ -542,7 +718,6 @@ async fn main(mut peripherals: Peripherals) {
                     &(*scaled).data as *const *mut _,
                     &(*scaled).linesize as *const _,
                 );
-                ffmpeg::sws_freeContext(scale_context);
 
                 let raw_pixels = core::slice::from_raw_parts(
                     (*scaled).data[0],
@@ -552,12 +727,12 @@ async fn main(mut peripherals: Peripherals) {
 
                 let fract = (*stream).time_base.num as f64 / (*stream).time_base.den as f64;
                 let pres = (*packet).pts as f64 * fract;
-                println!("took {:?} to render", begin.elapsed());
-                println!(
-                    "current time: {}, presenting at: {pres}",
-                    start.elapsed().as_secs_f64()
-                );
-                sleep_until(start + Duration::from_secs_f64(pres)).await;
+                //println!("took {:?} to render", begin.elapsed());
+                //println!(
+                //    "current time: {}, presenting at: {pres}",
+                //    start.elapsed().as_secs_f64()
+                //);
+                //sleep_until(start + Duration::from_secs_f64(pres)).await;
 
                 peripherals.display.draw_buffer(
                     Rect::from_dimensions(
@@ -577,6 +752,7 @@ async fn main(mut peripherals: Peripherals) {
             ffmpeg::av_packet_unref(packet);
         }
 
+        ffmpeg::sws_freeContext(scale_context);
         ffmpeg::avformat_close_input(&mut av_context as *mut _);
 
         let _: Box<File> = Box::from_raw((*avio_ctx).opaque.cast());

@@ -1,0 +1,13 @@
+[built-in options]
+c_args = ['--config=newlib.cfg', '--config=Omax.cfg', '--config=OmaxLTO.cfg', '--target=arm-none-eabihf','-march=armv7a', '-mcpu=cortex-a9', '-fno-rtti', '-fno-exceptions', '-D_POSIX_THREADS']
+c_link_args = ['--config=newlib.cfg', '--config=Omax.cfg', '--config=OmaxLTO.cfg', '--target=arm-none-eabihf', '-march=armv7a', '-mcpu=cortex-a9', '-fno-rtti', '-fno-exceptions']
+
+[properties]
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'none'
+cpu_family = 'arm'
+cpu = 'cortex-a9'
+abi = 'eabi'
+endian = 'little'

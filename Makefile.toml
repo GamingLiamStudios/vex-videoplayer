@@ -1,0 +1,128 @@
+[env]
+LLVM_VERSION = "19.1.5"
+PLATFORM = { source = "${CARGO_MAKE_RUST_TARGET_OS}", mapping = { "linux" = "Linux", "macos" = "Darwin", "windows" = "Windows" } }
+ARCH = { source = "${CARGO_MAKE_RUST_TARGET_ARCH}", mapping = { "x86_64" = "x86_64", "aarch64" = "AArch64" }, condition = { env_not = { "PLATFORM" = "Darwin" } } }
+PREFIX = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/native_libs"
+
+[config]
+init_task = "build_native"
+
+# TODO: Support MacOS
+# TODO: Check if we actually need newlib (could make compiling slightly nicer)
+
+[tasks.clean-libraries]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
+script_runner = "@shell"
+script = '''
+rm -r native_libs || true
+'''
+
+# TODO: Use system compiler if supported (or even rust compiler :o)
+[tasks.fetch-llvm]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
+condition = { files_not_exist = [ "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/llvm_toolchain" ] }
+env = { EXTENSION = { source = "${CARGO_MAKE_RUST_TARGET_OS}", default_value = "tar.xz", mapping = { "windows" = "zip" } }, ARCH = { value = "universal", condition = { env = { "PLATFORM" = "Darwin" } } } }
+script = '''
+curl -L https://github.com/ARM-software/LLVM-embedded-toolchain-for-Arm/releases/download/release-${LLVM_VERSION}/LLVM-ET-Arm-${LLVM_VERSION}-${PLATFORM}-${ARCH}.${EXTENSION} -o LLVM_toolchain.${EXTENSION}
+curl -L https://github.com/ARM-software/LLVM-embedded-toolchain-for-Arm/releases/download/release-${LLVM_VERSION}/LLVM-ET-Arm-newlib-overlay-${LLVM_VERSION}.${EXTENSION} -o LLVM_newlib.${EXTENSION}
+
+tar -xf LLVM_toolchain.${EXTENSION}
+mv LLVM-ET-Arm-${LLVM_VERSION}-${PLATFORM}-${ARCH} llvm_toolchain
+tar -xf LLVM_newlib.${EXTENSION} -C llvm_toolchain
+
+rm LLVM_toolchain.${EXTENSION} LLVM_newlib.${EXTENSION}
+'''
+
+[tasks.fetch-llvm.windows]
+script_runner = "powershell"
+script_extension = "ps1"
+script = '''
+Invoke-WebRequest -Uri https://github.com/ARM-software/LLVM-embedded-toolchain-for-Arm/releases/download/release-${LLVM_VERSION}/LLVM-ET-Arm-${LLVM_VERSION}-${PLATFORM}-${ARCH}.${EXTENSION} -OutFile LLVM_toolchain.${EXTENSION}
+Invoke-WebRequest -Uri https://github.com/ARM-software/LLVM-embedded-toolchain-for-Arm/releases/download/release-${LLVM_VERSION}/LLVM-ET-Arm-newlib-overlay-${LLVM_VERSION}.${EXTENSION} -OutFile LLVM_newlib.${EXTENSION}
+
+Expand-Archive -LiteralPath LLVM_toolchain.${EXTENSION} -DestinationPath .
+Rename-Item -Path LLVM-ET-Arm-${LLVM_VERSION}-${PLATFORM}-${ARCH} -NewName llvm_toolchain
+Expand-Archive -LiteralPath LLVM_newlib.${EXTENSION} -DestinationPath ./llvm_toolchain
+'''
+
+[tasks.config]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
+script_runner = "@shell"
+script.pre = '''
+mkdir -p native_libs/lib || true
+'''
+
+[tasks.config_llvm_local]
+extend = "config"
+env = { TOOLCHAIN_PREFIX = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/llvm_toolchain/bin/" }
+
+[tasks.build_native]
+dependencies = [ "fetch-llvm" ]
+run_task = [
+    { name = "config_llvm_local", condition = { files_exist = ["${CARGO_MAKE_WORKING_DIRECTORY}/llvm_toolchain"] } }
+]
+
+[tasks.build-libdav1d]
+cwd = "libdav1d"
+script_runner = "@shell"
+script = '''
+rm build || true
+mkdir build || true
+cd build
+
+cp "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/arm-none-eabi.meson" .
+echo '[binaries]' >> arm-none-eabi.meson
+echo "c = '${TOOLCHAIN_PREFIX}clang'" >> arm-none-eabi.meson
+echo "cpp = '${TOOLCHAIN_PREFIX}clang++'" >> arm-none-eabi.meson
+echo "ar = '${TOOLCHAIN_PREFIX}llvm-ar'" >> arm-none-eabi.meson
+echo "as = '${TOOLCHAIN_PREFIX}clang'" >> arm-none-eabi.meson
+echo "ld = '${TOOLCHAIN_PREFIX}ld.lld'" >> arm-none-eabi.meson
+echo "strip = '${TOOLCHAIN_PREFIX}llvm-strip'" >> arm-none-eabi.meson
+
+meson setup -Ddefault_library=static -Dprefer_static=true -Db_lto=true -Denable_tests=false -Denable_tools=false -Dmalloc_prefix="vexide_" -Doptimization=3 .. \
+     --cross-file=arm-none-eabi.meson --prefix="${PREFIX}" --libdir="${PREFIX}/lib"
+
+ninja
+ninja install
+'''
+
+[tasks.build-dummy]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
+script_runner = "@shell"
+script = '''
+${TOOLCHAIN_PREFIX}clang -static -c --config=newlib.cfg -target arm-none-eabihf -mcpu=cortex-a9 -fno-rtti -fno-exceptions -o dummy.o dummy.c
+${TOOLCHAIN_PREFIX}llvm-ar rc libdummy.a dummy.o
+rm dummy.o
+mv libdummy.a "${PREFIX}/lib/"
+'''
+
+[tasks.build-ffmpeg]
+cwd = "ffmpeg"
+dependencies = [
+    "build-dummy",
+    { name = "build-libdav1d", condition = { env_set = ["ENABLE_AV1"] } },
+]
+env = { AV1_OPTIONS = { value = "--enable-libdav1d --enable-parser=av1 --enable-decoder=libdav1d --enable-bsf=av1_metadata", condition = { env_set = ["ENABLE_AV1"] } }, H264_OPTIONS = { value = "--enable-parser=h264 --enable-decoder=h264 --enable-bsf=h264_metadata", condition = { env_set = ["ENABLE_H264"] } }, HEVC_OPTIONS = { value = "--enable-parser=hevc --enable-decoder=hevc --enable-bsf=hevc_metadata", condition = { env_set = ["ENABLE_HEVC"] } }, PKG_CONFIG_LIBDIR = "${PREFIX}/lib/pkgconfig" }
+script_runner = "@shell"
+script = '''
+echo $AV1_OPTIONS
+./configure --disable-runtime-cpudetect --disable-autodetect --enable-gpl --enable-nonfree --prefix="${PREFIX}" \
+    --enable-gray --enable-avcodec --enable-avformat --enable-pixelutils --enable-swscale \
+    --disable-swresample --disable-avdevice --disable-avfilter --disable-postproc --disable-programs --disable-protocols --disable-doc \
+    --cc="${TOOLCHAIN_PREFIX}clang" --cxx="${TOOLCHAIN_PREFIX}clang++" --ar="${TOOLCHAIN_PREFIX}llvm-ar" --as="${TOOLCHAIN_PREFIX}clang" --strip="${TOOLCHAIN_PREFIX}llvm-strip" \
+    --pkg-config-flags="--static" --extra-cflags="--config=newlib.cfg --config=Omax.cfg -target arm-none-eabihf -mcpu=cortex-a9 -fno-rtti -fno-exceptions" --extra-libs="-lnosys -lc -lm -ldummy" \
+    --arch=arm --cpu=cortex-a9 --target-os=none --enable-cross-compile --extra-ldflags="--config=newlib.cfg -target arm-none-eabihf -mcpu=cortex-a9 -fno-rtti -fno-exceptions -L${PREFIX}/lib" \
+    --enable-neon --enable-thumb --enable-pic --enable-lto=thin --enable-optimizations --disable-safe-bitstream-reader --malloc-prefix=vexide_ \
+    --disable-everything --enable-filter=color --enable-filter=scale \
+    --enable-demuxer=matroska --enable-demuxer=ogg --enable-demuxer=mov \
+    ${AV1_OPTIONS} ${H264_OPTIONS} ${HEVC_OPTIONS}
+make clean
+make -j12
+make install
+'''
+
+[tasks.build]
+cwd = "${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}"
+dependencies = [ "build-ffmpeg" ]
+command = "cargo"
+args = ["v5", "build", "--release"]

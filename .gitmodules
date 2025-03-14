@@ -1,4 +1,9 @@
 [submodule "ffmpeg"]
 	path = ffmpeg
-	url = git@github.com:FFmpeg/FFmpeg.git
+	url = https://git.ffmpeg.org/ffmpeg.git
 	tag = n7.1
+
+[submodule "libdav1d"]
+	path = libdav1d
+	url = https://github.com/GamingLiamStudios/libdav1d.git
+	branch = patch/single-thread

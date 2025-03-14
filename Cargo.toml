@@ -5,6 +5,12 @@ edition = "2024"
 
 build = "build.rs"
 
+[profile.release]
+opt-level = "z"
+debug = 2
+lto = "thin"
+codegen-units = 1
+
 # These fields configure default behavior for uploads with `cargo v5`.
 [package.metadata.v5]
 upload-strategy = "monolith"
@@ -13,8 +19,9 @@ icon = "cool-x"
 compress = true
 
 [dependencies]
-vexide = { version = "0.7.0", features = ["force_rust_libm", "allocator"] }
+vexide = { version = "0.7.0", features = ["force_rust_libm"] }
 rgb = "*"
+vex-sdk = "*"
 
 #rusty_ffmpeg = { version = "0.16", features = ["ffmpeg7"] }
 libc = { version = "0.2", default-features = false }
@@ -23,6 +30,6 @@ libc = { version = "0.2", default-features = false }
 bindgen = "0.71"
 
 [patch.crates-io]
-# very much something i threw together lmao, i'll make these part of my repo as a branch later
-vexide = { path = "../vexide/packages/vexide" }
-vexide-startup = { path = "../vexide/packages/vexide-startup" }
+# Remove when PR goes through
+vexide = { git = "https://github.com/GamingLiamStudios/vexide.git", branch = "patch/videoplayer" }
+vexide-startup = { git = "https://github.com/GamingLiamStudios/vexide.git", branch = "patch/videoplayer" }

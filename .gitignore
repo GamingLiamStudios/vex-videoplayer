@@ -97,3 +97,6 @@ $RECYCLE.BIN/
 .direnv/
 
 ffmpeg*
+native_libs
+llvm_toolchain
+libdav1d*

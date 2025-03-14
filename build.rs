@@ -1,4 +1,4 @@
-use core::{error::Error, result::Result};
+use core::{convert::From, error::Error, result::Result};
 use std::{env, path::PathBuf};
 
 static BLACKLIST: [&str; 6] = [
@@ -11,7 +11,7 @@ static BLACKLIST: [&str; 6] = [
 ];
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let libdir_path = PathBuf::from("ffmpeg-build")
+    let libdir_path = PathBuf::from("native_libs")
         .canonicalize()
         .expect("cannot canonicalize path");
 
@@ -20,15 +20,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         libdir_path.to_str().unwrap()
     );
 
+    let newlib_path = PathBuf::from(
+        "llvm_toolchain/lib/clang-runtimes/newlib/arm-none-eabi/armv7a_hard_vfpv3_d16",
+    )
+    .canonicalize()
+    .expect("cannot canonicalize path");
+
     // Newlib
-    println!("cargo:rustc-link-search=/usr/arm-none-eabi/lib");
+    println!(
+        "cargo:rustc-link-search={}/lib",
+        newlib_path.to_str().unwrap()
+    );
     println!("cargo:rustc-link-lib=c");
     println!("cargo:rustc-link-lib=m");
+    //println!("cargo:rustc-link-lib=nosys");
 
     println!("cargo:rustc-link-lib=static=avcodec");
     println!("cargo:rustc-link-lib=static=avformat");
     println!("cargo:rustc-link-lib=static=avutil");
     println!("cargo:rustc-link-lib=static=swscale");
+    println!("cargo:rustc-link-lib=static=dav1d");
 
     println!("cargo:rerun-if-changed=build.rs");
 
