@@ -70,9 +70,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .into_iter()
                 .map(|path| path.to_str().expect("shitface").to_owned()),
         )
-        .clang_arg("--target=arm-none-eabi")
+        .clang_arg("--target=arm-none-eabihf")
         .clang_arg(format!("-I{}", include_dir.to_string_lossy()))
-        .clang_arg("-I/usr/arm-none-eabi/include")
+        .clang_arg(format!("-I{}/include", newlib_path.to_str().unwrap()))
         .prepend_enum_name(false)
         .use_core()
         .clang_macro_fallback()
