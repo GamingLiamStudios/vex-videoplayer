@@ -1,4 +1,9 @@
-#![feature(c_size_t, sync_unsafe_cell, stdarch_arm_neon_intrinsics)]
+#![feature(
+    c_size_t,
+    sync_unsafe_cell,
+    stdarch_arm_neon_intrinsics,
+    slice_as_chunks
+)]
 #![no_main]
 #![no_std]
 
@@ -18,7 +23,7 @@ use core::{
     u8,
 };
 
-use rgb::{ComponentMap, FromSlice};
+use rgb::{Argb, Bgra, ComponentMap, FromSlice};
 use vexide::{
     devices::display::Rect,
     fs::File,
@@ -531,7 +536,7 @@ async fn main(mut peripherals: Peripherals) {
         core::ptr::addr_of!(__heap_end)
     );
 
-    let video_file = vexide::fs::File::open("monogatari.mkv").expect("shitface");
+    let video_file = vexide::fs::File::open("rickroll.webm").expect("shitface");
     println!("Opened file");
 
     unsafe {
@@ -664,7 +669,6 @@ async fn main(mut peripherals: Peripherals) {
         );
         */
 
-        let mut adjusted_frame = alloc::vec![rgb::Bgra::new_bgra(0u8, 0, 0, 0); (*codec_ctx).coded_width as usize * (*codec_ctx).coded_height as usize].into_boxed_slice();
         let mut scaled_frame = alloc::vec![rgb::Bgra::new_bgra(0u8, 0, 0, 0); Display::HORIZONTAL_RESOLUTION as usize * Display::VERTICAL_RESOLUTION as usize].into_boxed_slice();
 
         let mut last_frame = Instant::now();
@@ -704,15 +708,8 @@ async fn main(mut peripherals: Peripherals) {
                     }
                 }
 
-                println!("Time to decode frame: {:?}", last_frame.elapsed());
-
-                //println!("Decoded packet in {:?}", begin.elapsed());
-
+                //println!("Time to decode frame: {:?}", last_frame.elapsed());
                 // TODO: Colorspace conversion
-                // match (*frame).colorspace {
-                //     ffmpeg::AVCOL_SPC_RGB => (), // Do nothing; target fmt
-                //     space => unimplemented!("Unsupported Colorspace: {space}"),
-                // }
 
                 let begin = Instant::now();
 
@@ -720,24 +717,54 @@ async fn main(mut peripherals: Peripherals) {
                 let width = (*frame).width as usize;
                 let height = (*frame).height as usize;
 
-                // TODO: Rescale before Resample (why put in extra work, does make rescaling harder tho)
+                // Rescale image
+                // TODO: Bilinear/Average(area)
+                for y in 0..Display::VERTICAL_RESOLUTION as usize {
+                    let sy = y as f32 / f32::from(Display::VERTICAL_RESOLUTION);
+                    for x in 0..Display::HORIZONTAL_RESOLUTION as usize {
+                        let sx = x as f32 / f32::from(Display::HORIZONTAL_RESOLUTION);
+
+                        let nx = (sx * width as f32) as usize;
+                        let ny = (sy * height as f32) as usize;
+
+                        let dst =
+                            &mut scaled_frame[y * Display::HORIZONTAL_RESOLUTION as usize + x];
+
+                        match (*frame).format {
+                            ffmpeg::AV_PIX_FMT_YUV420P => {
+                                // Copy over into 4:4:4 format
+                                let luma_stride = line_size[0] as usize;
+                                let luma_plane = (*frame).data[0].cast_const();
+
+                                let blue_stride = line_size[1] as usize;
+                                let blue_plane = (*frame).data[1].cast_const();
+
+                                let red_stride = line_size[2] as usize;
+                                let red_plane = (*frame).data[2].cast_const();
+
+                                let luma = luma_plane.add(ny * luma_stride + nx).read();
+
+                                // Each CbCr represents a 2x2 field of luma
+                                let chroma_blue =
+                                    blue_plane.add((ny >> 1) * blue_stride + (nx >> 1)).read();
+                                let chroma_red =
+                                    red_plane.add((ny >> 1) * red_stride + (nx >> 1)).read();
+
+                                *dst = Bgra::new_bgra(luma, chroma_blue, chroma_red, 0);
+                            }
+                            format => unimplemented!("Unsupported pixel format: {format}"),
+                        }
+                    }
+                }
+
+                //println!("Took {:?} to Rescale", begin.elapsed());
+                //let begin = Instant::now();
 
                 // Convert to 0RGB (8bit)
                 match (*frame).format {
                     ffmpeg::AV_PIX_FMT_0RGB => (), // Do nothing; target fmt
                     ffmpeg::AV_PIX_FMT_YUV420P => {
-                        let luma_stride = line_size[0] as usize;
-                        let luma_plane: *const u8 = (*frame).data[0].cast();
-
-                        let blue_stride = line_size[1] as usize;
-                        let blue_plane: *const u8 = (*frame).data[1].cast();
-
-                        let red_stride = line_size[2] as usize;
-                        let red_plane: *const u8 = (*frame).data[2].cast();
-
                         // TODO: Fix color fringing
-
-                        // Each CbCr represents a 2x2 field of luma
 
                         // TODO: Change these constants depending on colorspace
                         const CHROMA_BLUE_WEIGHTS: [i16; 2] = [
@@ -753,92 +780,49 @@ async fn main(mut peripherals: Peripherals) {
 
                         let half = vmovq_n_s16(128);
 
-                        for hy in 0..height / 2 {
-                            let scanline_blue = blue_plane.add(hy * blue_stride);
-                            let scanline_red = red_plane.add(hy * red_stride);
+                        for block in (0..scaled_frame.len()).step_by(8) {
+                            let uint8x8x4_t(luma, chroma_red, chroma_blue, alpha) =
+                                vld4_u8(scaled_frame.as_ptr().add(block).cast());
 
-                            for y in (hy * 2)..(hy + 1) * 2 {
-                                let scanline_luma = luma_plane.add(y * luma_stride);
+                            // Scale YUV
+                            let luma = vshlq_n_s16::<7>(vreinterpretq_s16_u16(vmovl_u8(luma)));
+                            let chroma_red =
+                                vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(chroma_red)), half);
+                            let chroma_blue =
+                                vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(chroma_blue)), half);
 
-                                for hx in (0..width / 2).step_by(4) {
-                                    let chroma_blue = vld1_u8(scanline_blue.add(hx)); // Read 8 chromas
-                                    let chroma_blue = vreinterpretq_s16_u16(vmovl_u8(
-                                        // Interleave with itself, broadcasting duplicates into adjacent lanes
-                                        vzip_u8(chroma_blue, chroma_blue).0, // Downsample to first vector (4 chromas, duplicated adj)
-                                    ));
-                                    let chroma_blue = vsubq_s16(chroma_blue, half);
+                            let red = vaddq_s16(
+                                luma,
+                                vmulq_s16(chroma_red, vmovq_n_s16(CHROMA_RED_WEIGHTS[0])),
+                            );
+                            let green = vsubq_s16(
+                                luma,
+                                vaddq_s16(
+                                    vmulq_s16(chroma_blue, vmovq_n_s16(CHROMA_BLUE_WEIGHTS[0])),
+                                    vmulq_s16(chroma_red, vmovq_n_s16(CHROMA_RED_WEIGHTS[1])),
+                                ),
+                            );
+                            let blue = vaddq_s16(
+                                luma,
+                                vmulq_s16(chroma_blue, vmovq_n_s16(CHROMA_BLUE_WEIGHTS[1])),
+                            );
 
-                                    // So we're really only using 4 chromas (2x2 block size)
-                                    let chroma_red = vld1_u8(scanline_red.add(hx));
-                                    let chroma_red = vreinterpretq_s16_u16(vmovl_u8(
-                                        vzip_u8(chroma_red, chroma_red).0,
-                                    ));
-                                    let chroma_red = vsubq_s16(chroma_red, half);
-
-                                    // Load 8x lumas, shift left 7
-                                    let luma = vshlq_n_s16::<7>(vreinterpretq_s16_u16(vmovl_u8(
-                                        vld1_u8(scanline_luma.add(hx * 2)),
-                                    )));
-
-                                    // Assuming BT.709
-                                    let red = vaddq_s16(
-                                        luma,
-                                        vmulq_s16(chroma_red, vmovq_n_s16(CHROMA_RED_WEIGHTS[0])),
-                                    );
-                                    let green = vsubq_s16(
-                                        luma,
-                                        vaddq_s16(
-                                            vmulq_s16(
-                                                chroma_blue,
-                                                vmovq_n_s16(CHROMA_BLUE_WEIGHTS[0]),
-                                            ),
-                                            vmulq_s16(
-                                                chroma_red,
-                                                vmovq_n_s16(CHROMA_RED_WEIGHTS[1]),
-                                            ),
-                                        ),
-                                    );
-                                    let blue = vaddq_s16(
-                                        luma,
-                                        vmulq_s16(chroma_blue, vmovq_n_s16(CHROMA_BLUE_WEIGHTS[1])),
-                                    );
-
-                                    // Store as interleaved rgba
-                                    let padding = vmovq_n_s16(64);
-                                    vst4_s8(
-                                        adjusted_frame.as_mut_ptr().add(y * width + hx * 2).cast(),
-                                        int8x8x4_t(
-                                            vmovn_s16(vshrq_n_s16::<7>(vaddq_s16(blue, padding))),
-                                            vmovn_s16(vshrq_n_s16::<7>(vaddq_s16(green, padding))),
-                                            vmovn_s16(vshrq_n_s16::<7>(vaddq_s16(red, padding))),
-                                            vcreate_s8(0),
-                                        ),
-                                    );
-                                }
-                            }
+                            let padding = vmovq_n_s16(64);
+                            vst4_s8(
+                                scaled_frame.as_mut_ptr().add(block).cast(),
+                                int8x8x4_t(
+                                    vmovn_s16(vshrq_n_s16::<7>(vaddq_s16(red, padding))),
+                                    vmovn_s16(vshrq_n_s16::<7>(vaddq_s16(green, padding))),
+                                    vmovn_s16(vshrq_n_s16::<7>(vaddq_s16(blue, padding))),
+                                    vreinterpret_s8_u8(alpha),
+                                ),
+                            );
                         }
                     }
                     format => unimplemented!("Unsupported pixel format: {format}"),
                 }
 
-                println!("Took {:?} to Resample to RGB", begin.elapsed());
-                let begin = Instant::now();
-
-                // Rescale image
-                // TODO: Bilinear/Average(area)
-                for y in 0..Display::VERTICAL_RESOLUTION as usize {
-                    let sy = y as f32 / f32::from(Display::VERTICAL_RESOLUTION);
-                    for x in 0..Display::HORIZONTAL_RESOLUTION as usize {
-                        let sx = x as f32 / f32::from(Display::HORIZONTAL_RESOLUTION);
-
-                        let nx = (sx * width as f32) as usize;
-                        let ny = (sy * height as f32) as usize;
-                        scaled_frame[y * Display::HORIZONTAL_RESOLUTION as usize + x] =
-                            adjusted_frame[ny * width + nx];
-                    }
-                }
-
-                println!("Took {:?} to Rescale", begin.elapsed());
+                //println!("Took {:?} to Resample to RGB", begin.elapsed());
 
                 /*
                 // Rescale to brain size + color format
