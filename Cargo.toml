@@ -22,9 +22,11 @@ compress = true
 vexide = { version = "0.7.0", features = ["force_rust_libm"] }
 rgb = "*"
 vex-sdk = "*"
+bytemuck = "*"
 
 #rusty_ffmpeg = { version = "0.16", features = ["ffmpeg7"] }
 libc = { version = "0.2", default-features = false }
+fixed = { version = "1.29", default-features = false }
 
 [build-dependencies]
 bindgen = "0.71"

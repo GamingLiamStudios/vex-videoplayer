@@ -25,6 +25,7 @@ To specify the video types you would like to decode (since otherwise the binary 
 - `ENABLE_AV1=true`
 - `ENABLE_H264=true`
 - `ENABLE_HEVC=true`
+- `ENABLE_VP9=true`
 
 This can be set either by Enviornment Variables, or via `cargo make -e ENABLE_XXX=true -e ENABLE_YYY=true build`.
 To configure the file being read for playback, consult the main fn in `src/main.rs`. It should be pretty obvious where it's set from there.
@@ -34,4 +35,4 @@ To configure the file being read for playback, consult the main fn in `src/main.
 - Allow large binary sizes via clever use of SD & memory copies
 - Speed up playback to 60fps (faster scaling)
 - Better performance profiling
-- Fullscreen?
+- ~~Fullscreen?~~ apparently not possible :(
